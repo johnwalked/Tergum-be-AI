@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { GlassCard } from './GlassCard';
 import { Upload, Play, Pause, Volume2, Settings, Scissors, Sparkles, RefreshCw, AlertTriangle, Download, Edit2, Save, X, Mic, UserPlus, WifiOff, Clock, User, Zap, Key } from 'lucide-react';
-import { analyzeVideoForDubbing, translateAndRefineScript, generateSpeechTTS, audioBufferToWav, analyzeVoiceSample, checkApiConnection, setGeminiApiKey } from '../services/geminiService';
+import { analyzeVideoForDubbing, translateAndRefineScript, generateSpeechTTS, audioBufferToWav, analyzeVoiceSample, checkApiConnection, setGeminiApiKey, hasApiKey } from '../services/geminiService';
 import { ProcessingStatus, VideoAnalysisResult, SpeakerAnalysis, DubbingSegment, ClonedVoice } from '../types';
 
 interface AudioData { url: string; duration: number; }
@@ -96,8 +96,8 @@ export const VideoDubber: React.FC<{ interfaceLang?: 'am' | 'en' }> = ({ interfa
   
   // Initial API Check
   useEffect(() => {
-      const storedKey = localStorage.getItem('nebula_api_key');
-      if (!storedKey && !process.env.API_KEY) {
+      // Use helper to avoid crash if process is undefined in browser
+      if (!hasApiKey()) {
           setShowKeyModal(true);
       } else {
           checkApiConnection().then(setApiConnected);

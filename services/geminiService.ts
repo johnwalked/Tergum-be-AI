@@ -8,8 +8,24 @@ export const setGeminiApiKey = (key: string) => {
     localStorage.setItem('nebula_api_key', key);
 };
 
+// Helper to safely access environment variable without crashing if process is undefined
+const getEnvApiKey = (): string | undefined => {
+    try {
+        if (typeof process !== 'undefined' && process.env?.API_KEY) {
+            return process.env.API_KEY;
+        }
+    } catch (e) {
+        // process is not defined, ignore
+    }
+    return undefined;
+};
+
+export const hasApiKey = (): boolean => {
+    return !!(userApiKey || getEnvApiKey());
+};
+
 const getClient = () => {
-  const apiKey = userApiKey || process.env.API_KEY;
+  const apiKey = userApiKey || getEnvApiKey();
   if (!apiKey) throw new Error("API Key missing. Please set it in the settings.");
   return new GoogleGenAI({ apiKey });
 };
