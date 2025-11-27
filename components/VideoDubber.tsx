@@ -58,7 +58,7 @@ export const VideoDubber: React.FC<{ interfaceLang?: 'am' | 'en' }> = ({ interfa
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [originalVolume, setOriginalVolume] = useState(0.2); 
+  const [originalVolume, setOriginalVolume] = useState(0.5); 
   const [activeSegmentId, setActiveSegmentId] = useState<string | null>(null);
   
   // UI State
@@ -87,7 +87,10 @@ export const VideoDubber: React.FC<{ interfaceLang?: 'am' | 'en' }> = ({ interfa
   
   // AudioContext Refs
   const playbackCtxRef = useRef<AudioContext | null>(null);
-  const gainNodeRef = useRef<GainNode | null>(null);
+  const dubGainNodeRef = useRef<GainNode | null>(null); // For dubbed audio
+  const bgGainNodeRef = useRef<GainNode | null>(null); // For background video audio
+  const videoSourceNodeRef = useRef<MediaElementAudioSourceNode | null>(null);
+
   // Track all running sources to allow overlaps (crossfades) and cleanup
   const runningSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
   
@@ -109,18 +112,50 @@ export const VideoDubber: React.FC<{ interfaceLang?: 'am' | 'en' }> = ({ interfa
       }
   };
 
-  // Initialize Audio Context on user interaction
+  // Initialize Audio Context and Graph
   const initAudioContext = () => {
     if (!playbackCtxRef.current) {
         const AudioCtor = window.AudioContext || (window as any).webkitAudioContext;
-        playbackCtxRef.current = new AudioCtor(); // Use native sample rate for better quality
-        const gain = playbackCtxRef.current.createGain();
-        gain.connect(playbackCtxRef.current.destination);
-        gainNodeRef.current = gain;
+        playbackCtxRef.current = new AudioCtor();
     }
+    const ctx = playbackCtxRef.current;
+
+    // 1. Setup Dub Gain
+    if (!dubGainNodeRef.current) {
+        dubGainNodeRef.current = ctx.createGain();
+        dubGainNodeRef.current.connect(ctx.destination);
+    }
+
+    // 2. Setup Video Background Gain (Mixing logic)
+    // We create a MediaElementSource from the video tag so we can control it via WebAudio
+    if (videoRef.current && !videoSourceNodeRef.current) {
+        try {
+            // Note: createMediaElementSource can only be called once per element
+            const src = ctx.createMediaElementSource(videoRef.current);
+            videoSourceNodeRef.current = src;
+            
+            const bgGain = ctx.createGain();
+            bgGain.value = originalVolume;
+            src.connect(bgGain);
+            bgGain.connect(ctx.destination);
+            bgGainNodeRef.current = bgGain;
+        } catch (e) {
+            console.warn("MediaElementSource already attached or error:", e);
+        }
+    }
+
     if (playbackCtxRef.current.state === 'suspended') {
         playbackCtxRef.current.resume();
     }
+  };
+
+  // Update volume via GainNode instead of element volume
+  const handleVolumeChange = (newVol: number) => {
+      setOriginalVolume(newVol);
+      if (bgGainNodeRef.current) {
+          // Smooth transition
+          bgGainNodeRef.current.gain.setTargetAtTime(newVol, playbackCtxRef.current?.currentTime || 0, 0.1);
+      }
   };
 
   // Keyboard Shortcuts
@@ -176,7 +211,12 @@ export const VideoDubber: React.FC<{ interfaceLang?: 'am' | 'en' }> = ({ interfa
       });
       runningSourcesRef.current.clear();
       activeSegmentRef.current = null;
-      if (videoRef.current) videoRef.current.volume = originalVolume;
+      
+      // Reset background volume immediately
+      if (bgGainNodeRef.current && playbackCtxRef.current) {
+          bgGainNodeRef.current.gain.cancelScheduledValues(playbackCtxRef.current.currentTime);
+          bgGainNodeRef.current.gain.setValueAtTime(originalVolume, playbackCtxRef.current.currentTime);
+      }
   };
 
   const resetState = () => {
@@ -335,18 +375,19 @@ export const VideoDubber: React.FC<{ interfaceLang?: 'am' | 'en' }> = ({ interfa
       if (isPlaying) {
           if (inSegment && activeSegmentRef.current?.id !== currentSeg.id) {
               // New Segment Detected - Play It!
-              // Note: We DO NOT stop previous audio here, allowing crossfade/overlap
               activeSegmentRef.current = currentSeg;
               
               const audioData = dubbedAudioDataRef.current[currentSeg.id];
               const ctx = playbackCtxRef.current;
               
-              if (audioData && ctx && gainNodeRef.current) {
+              if (audioData && ctx && dubGainNodeRef.current) {
                   fetch(audioData.url)
                     .then(r => r.arrayBuffer())
                     .then(buf => ctx.decodeAudioData(buf))
                     .then(decodedBuffer => {
                         // Safety check: if user paused or seeked while decoding
+                        // BUT: If exporting, we ignore paused state because we are driving it programmatically
+                        // We can check isExporting state indirectly? Or just rely on isPlaying (which is true during export)
                         if (videoRef.current?.paused) return;
                         
                         const source = ctx.createBufferSource();
@@ -355,17 +396,14 @@ export const VideoDubber: React.FC<{ interfaceLang?: 'am' | 'en' }> = ({ interfa
                         const slotDur = currentSeg.endTime - currentSeg.startTime;
                         let rate = decodedBuffer.duration / slotDur;
                         
-                        // --- FIX PITCH / CHIPMUNK ISSUE ---
-                        // We strictly cap the playback rate to 1.3x max as per user request.
-                        // Lower bound 0.8x allows filling gaps.
-                        // If the audio is longer, it will naturally OVERLAP into the next segment or silence.
+                        // Fix Pitch: Cap at 1.3x
                         rate = Math.min(Math.max(rate, 0.8), 1.3);
                         
                         source.playbackRate.value = rate;
                         
                         const sourceGain = ctx.createGain();
                         source.connect(sourceGain);
-                        sourceGain.connect(gainNodeRef.current!);
+                        sourceGain.connect(dubGainNodeRef.current!);
 
                         const currentVTime = videoRef.current?.currentTime || 0;
                         const offset = Math.max(0, (currentVTime - currentSeg.startTime) * rate);
@@ -382,21 +420,22 @@ export const VideoDubber: React.FC<{ interfaceLang?: 'am' | 'en' }> = ({ interfa
                             source.start(now, offset);
                             runningSourcesRef.current.add(source);
                             
-                            // Ducking
-                            if (videoRef.current) videoRef.current.volume = originalVolume * 0.05; 
+                            // Ducking - Use GainNode
+                            if (bgGainNodeRef.current) {
+                                bgGainNodeRef.current.gain.setTargetAtTime(originalVolume * 0.1, now, 0.1);
+                            }
                             
                             source.onended = () => {
                                 runningSourcesRef.current.delete(source);
                                 // Restore volume only if no other dubbed audio is playing
-                                if (runningSourcesRef.current.size === 0 && videoRef.current) {
-                                     videoRef.current.volume = originalVolume;
+                                if (runningSourcesRef.current.size === 0 && bgGainNodeRef.current) {
+                                     bgGainNodeRef.current.gain.setTargetAtTime(originalVolume, ctx.currentTime, 0.5);
                                 }
                             };
                         }
                     })
                     .catch(err => {
                          console.warn("Decode error for seg", currentSeg.id, err);
-                         if (videoRef.current) videoRef.current.volume = originalVolume;
                     });
               }
           }
@@ -411,53 +450,83 @@ export const VideoDubber: React.FC<{ interfaceLang?: 'am' | 'en' }> = ({ interfa
   }, [syncLoop]);
 
   const handleExport = async () => {
-      if (!analysis) return;
+      if (!analysis || !videoRef.current || !playbackCtxRef.current) return;
       setIsExporting(true);
-      try {
-          const exportDuration = Number.isFinite(duration) && duration > 0 ? duration : analysis.segments[analysis.segments.length-1].endTime + 2;
-          const offlineCtx = new OfflineAudioContext(1, Math.ceil(exportDuration * 24000), 24000);
-          
-          for (const seg of analysis.segments) {
-              const data = dubbedAudioData[seg.id];
-              if (data) {
-                  try {
-                      const buf = await fetch(data.url).then(r => r.arrayBuffer()).then(b => offlineCtx.decodeAudioData(b));
-                      const src = offlineCtx.createBufferSource();
-                      src.buffer = buf;
-                      const slotDur = seg.endTime - seg.startTime;
-                      
-                      // Apply same pitch constraints to export
-                      let rate = buf.duration / slotDur;
-                      // Cap 1.3x for quality export
-                      rate = Math.min(Math.max(rate, 0.8), 1.3);
-                      
-                      src.playbackRate.value = rate;
-                      
-                      // Add fades to export as well
-                      const gain = offlineCtx.createGain();
-                      src.connect(gain);
-                      gain.connect(offlineCtx.destination);
-                      
-                      gain.gain.setValueAtTime(0, seg.startTime);
-                      gain.gain.linearRampToValueAtTime(1, seg.startTime + 0.05);
-                      const dur = buf.duration / rate;
-                      gain.gain.setValueAtTime(1, seg.startTime + dur - 0.05);
-                      gain.gain.linearRampToValueAtTime(0, seg.startTime + dur);
+      
+      const ctx = playbackCtxRef.current;
+      const dest = ctx.createMediaStreamDestination();
+      
+      // Connect our mixer nodes to the recorder destination
+      if (bgGainNodeRef.current) bgGainNodeRef.current.connect(dest);
+      if (dubGainNodeRef.current) dubGainNodeRef.current.connect(dest);
 
-                      src.start(seg.startTime);
-                  } catch (err) {
-                      console.warn(`Skipping segment ${seg.id} in export due to decode error:`, err);
-                  }
-              }
-          }
-          const rendered = await offlineCtx.startRendering();
-          const url = URL.createObjectURL(audioBufferToWav(rendered));
-          const a = document.createElement('a'); a.href = url; a.download = 'nebula_dub_export.wav'; a.click();
+      // Capture Video Stream
+      let videoStream: MediaStream;
+      try {
+          // @ts-ignore
+          videoStream = videoRef.current.captureStream ? videoRef.current.captureStream() : videoRef.current.mozCaptureStream();
       } catch (e) {
-          console.error("Export failed", e);
-          setErrorMessage("Export Failed. Please try again.");
+          alert("Browser does not support capturing video stream (needs Chrome/Firefox/Edge).");
+          setIsExporting(false);
+          return;
       }
-      setIsExporting(false);
+
+      // Combine Video Track + Mixed Audio Track
+      const combinedStream = new MediaStream([
+          ...videoStream.getVideoTracks(),
+          ...dest.stream.getAudioTracks()
+      ]);
+
+      const chunks: Blob[] = [];
+      const recorder = new MediaRecorder(combinedStream, {
+          mimeType: 'video/webm; codecs=vp9'
+      });
+      
+      recorder.ondataavailable = (e) => {
+          if (e.data.size > 0) chunks.push(e.data);
+      };
+
+      recorder.onstop = () => {
+          const blob = new Blob(chunks, { type: 'video/webm' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = 'nebula_dubbed_video.webm';
+          a.click();
+          
+          // Cleanup
+          if (bgGainNodeRef.current) bgGainNodeRef.current.disconnect(dest);
+          if (dubGainNodeRef.current) dubGainNodeRef.current.disconnect(dest);
+          
+          setIsExporting(false);
+          setDetailedStatus("");
+          
+          // Reset
+          if (videoRef.current) videoRef.current.currentTime = 0;
+          setIsPlaying(false);
+      };
+
+      // Start Realtime Export
+      setDetailedStatus("Rendering Video... DO NOT CLOSE TAB");
+      
+      // Rewind and Play
+      videoRef.current.currentTime = 0;
+      setCurrentTime(0);
+      setIsPlaying(true); // Triggers syncLoop
+      
+      recorder.start();
+      
+      try {
+        await videoRef.current.play();
+      } catch (e) {
+          console.error("Playback failed during export", e);
+          setIsExporting(false);
+      }
+      
+      // Stop when video ends
+      videoRef.current.onended = () => {
+          recorder.stop();
+      };
   };
 
   const handleVoiceUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -521,7 +590,18 @@ export const VideoDubber: React.FC<{ interfaceLang?: 'am' | 'en' }> = ({ interfa
 
              {videoUrl ? (
                <div className="relative w-full h-full bg-black flex items-center justify-center">
-                 <video ref={videoRef} src={videoUrl} className="max-w-full max-h-full" onPlay={() => { initAudioContext(); setIsPlaying(true); }} onPause={() => setIsPlaying(false)} onEnded={() => setIsPlaying(false)} onLoadedMetadata={e => setDuration(e.currentTarget.duration)} />
+                 {/* Video Element - crossOrigin is important for captureStream if src was external, but here it is blob */}
+                 <video 
+                    ref={videoRef} 
+                    src={videoUrl} 
+                    className="max-w-full max-h-full" 
+                    crossOrigin="anonymous"
+                    onPlay={() => { initAudioContext(); setIsPlaying(true); }} 
+                    onPause={() => setIsPlaying(false)} 
+                    onEnded={() => { setIsPlaying(false); }} 
+                    onLoadedMetadata={e => setDuration(e.currentTarget.duration)} 
+                 />
+                 
                  {/* Subtitles */}
                  {activeSegmentId && (
                     <div className="absolute w-full flex justify-center pointer-events-none z-20 transition-all" style={{ bottom: `${subSettings.bottom}%` }}>
@@ -530,16 +610,16 @@ export const VideoDubber: React.FC<{ interfaceLang?: 'am' | 'en' }> = ({ interfa
                         </span>
                     </div>
                  )}
-                 {/* Progress Overlay during processing */}
-                 {(status === ProcessingStatus.ANALYZING || status === ProcessingStatus.GENERATING) && (
+                 {/* Progress Overlay during processing or exporting */}
+                 {(status === ProcessingStatus.ANALYZING || status === ProcessingStatus.GENERATING || isExporting) && (
                      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm z-30 flex flex-col items-center justify-center">
                          <div className="w-64 space-y-4 text-center">
                              <div className="relative w-full h-2 bg-white/10 rounded-full overflow-hidden">
-                                 <div className="absolute h-full bg-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.6)] transition-all duration-300" style={{ width: `${progress}%` }} />
+                                 <div className="absolute h-full bg-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.6)] transition-all duration-300" style={{ width: isExporting ? `${(currentTime/duration)*100}%` : `${progress}%` }} />
                              </div>
                              <div>
                                 <h3 className="text-blue-300 font-bold font-ethiopic animate-pulse">{detailedStatus}</h3>
-                                {estimatedSeconds !== null && estimatedSeconds > 0 && (
+                                {!isExporting && estimatedSeconds !== null && estimatedSeconds > 0 && (
                                     <p className="text-xs text-gray-400 mt-1 font-mono">{t.estTime}: ~{estimatedSeconds}{t.sec}</p>
                                 )}
                              </div>
@@ -547,7 +627,7 @@ export const VideoDubber: React.FC<{ interfaceLang?: 'am' | 'en' }> = ({ interfa
                      </div>
                  )}
                  {/* Controls */}
-                 <div className="absolute bottom-8 left-1/2 -translate-x-1/2 w-[90%] max-w-2xl z-40 opacity-0 group-hover:opacity-100 transition-all translate-y-4 group-hover:translate-y-0">
+                 <div className={`absolute bottom-8 left-1/2 -translate-x-1/2 w-[90%] max-w-2xl z-40 opacity-0 group-hover:opacity-100 transition-all translate-y-4 group-hover:translate-y-0 ${isExporting ? 'pointer-events-none opacity-0' : ''}`}>
                      <div className="bg-black/60 backdrop-blur-2xl border border-white/10 rounded-[2rem] p-4 shadow-2xl">
                         {/* Enhanced Scrubber */}
                         <div 
@@ -586,7 +666,7 @@ export const VideoDubber: React.FC<{ interfaceLang?: 'am' | 'en' }> = ({ interfa
                              <div className="flex gap-4 items-center">
                                 <div className="flex items-center gap-2 bg-white/5 rounded-full px-3 py-1">
                                     <Volume2 className="w-4 h-4 text-gray-400"/>
-                                    <input type="range" min="0" max="1" step="0.1" value={originalVolume} onChange={e => { setOriginalVolume(parseFloat(e.target.value)); if (videoRef.current) videoRef.current.volume = parseFloat(e.target.value); }} className="w-20 h-1 bg-white/20 rounded-lg appearance-none"/>
+                                    <input type="range" min="0" max="1" step="0.1" value={originalVolume} onChange={e => handleVolumeChange(parseFloat(e.target.value))} className="w-20 h-1 bg-white/20 rounded-lg appearance-none"/>
                                 </div>
                                 <button onClick={() => setShowSubSettings(!showSubSettings)}><Settings className="w-5 h-5 text-gray-400 hover:text-white transition-colors"/></button>
                                 <button onClick={() => setShowKeyModal(true)} title="Update API Key" className="p-2 hover:bg-white/10 rounded-full transition-colors"><Key className="w-4 h-4 text-yellow-500/70" /></button>
