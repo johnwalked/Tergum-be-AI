@@ -1,0 +1,8 @@
+{
+  "name": "NebulaDub - AI Voice Studio",
+  "description": "A next-generation liquid glass dubbing and voice studio powered by Gemini 2.5 and 3.0. Features video dubbing, live conversational AI, and text-to-speech generation.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ]
+}
