@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { GlassCard } from './GlassCard';
-import { Upload, Play, Pause, Volume2, Settings, Scissors, Sparkles, RefreshCw, AlertTriangle, Download, Edit2, Save, X, Mic, UserPlus, WifiOff, Clock, User, Zap } from 'lucide-react';
-import { analyzeVideoForDubbing, translateAndRefineScript, generateSpeechTTS, audioBufferToWav, analyzeVoiceSample, checkApiConnection } from '../services/geminiService';
+import { Upload, Play, Pause, Volume2, Settings, Scissors, Sparkles, RefreshCw, AlertTriangle, Download, Edit2, Save, X, Mic, UserPlus, WifiOff, Clock, User, Zap, Key } from 'lucide-react';
+import { analyzeVideoForDubbing, translateAndRefineScript, generateSpeechTTS, audioBufferToWav, analyzeVoiceSample, checkApiConnection, setGeminiApiKey } from '../services/geminiService';
 import { ProcessingStatus, VideoAnalysisResult, SpeakerAnalysis, DubbingSegment, ClonedVoice } from '../types';
 
 interface AudioData { url: string; duration: number; }
@@ -16,7 +16,7 @@ const UI_TEXT = {
         retry: "እንደገና", cancel: "ተው", confirmSplit: "ከፋፍል", failedSegment: "መክሸፍ", failedReason: "ምክንያት",
         connectionLost: "የበይነመረብ ግንኙነት ጠፍቷል", checkKey: "ኤፒአይ ቁልፍን ያረጋግጡ",
         retryAll: "ሁሉንም እንደገና ይሞክሩ", translating: "ስክሪፕት በመተርጎም ላይ...",
-        estTime: "የቀረው ጊዜ", sec: "ሰከንድ"
+        estTime: "የቀረው ጊዜ", sec: "ሰከንድ", apiKeyRequired: "የ Gemini API ቁልፍ ያስፈልጋል", enterKey: "ቁልፍ ያስገቡ"
     },
     en: {
         uploadTitle: "UPLOAD VIDEO", uploadDesc: "Max 50MB • MP4/MOV",
@@ -26,7 +26,7 @@ const UI_TEXT = {
         retry: "Retry", cancel: "Cancel", confirmSplit: "Split", failedSegment: "Failed", failedReason: "Reason",
         connectionLost: "API Connection Failed", checkKey: "Check API Key",
         retryAll: "Retry All Failed", translating: "Translating Script...",
-        estTime: "Est. Time", sec: "s"
+        estTime: "Est. Time", sec: "s", apiKeyRequired: "Gemini API Key Required", enterKey: "Enter Key"
     }
 };
 
@@ -45,6 +45,10 @@ export const VideoDubber: React.FC<{ interfaceLang?: 'am' | 'en' }> = ({ interfa
   const [segmentErrors, setSegmentErrors] = useState<Record<string, string>>({}); 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [apiConnected, setApiConnected] = useState<boolean>(true);
+  
+  // API Key State
+  const [showKeyModal, setShowKeyModal] = useState(false);
+  const [tempApiKey, setTempApiKey] = useState('');
   
   // Progress State
   const [progress, setProgress] = useState(0);
@@ -89,8 +93,21 @@ export const VideoDubber: React.FC<{ interfaceLang?: 'am' | 'en' }> = ({ interfa
   
   // Initial API Check
   useEffect(() => {
-      checkApiConnection().then(setApiConnected);
+      const storedKey = localStorage.getItem('nebula_api_key');
+      if (!storedKey && !process.env.API_KEY) {
+          setShowKeyModal(true);
+      } else {
+          checkApiConnection().then(setApiConnected);
+      }
   }, []);
+
+  const handleSaveApiKey = () => {
+      if (tempApiKey.trim()) {
+          setGeminiApiKey(tempApiKey.trim());
+          setShowKeyModal(false);
+          checkApiConnection().then(setApiConnected);
+      }
+  };
 
   // Initialize Audio Context on user interaction
   const initAudioContext = () => {
@@ -218,7 +235,7 @@ export const VideoDubber: React.FC<{ interfaceLang?: 'am' | 'en' }> = ({ interfa
     if (!apiConnected) {
         const check = await checkApiConnection();
         setApiConnected(check);
-        if (!check) { setErrorMessage(t.connectionLost); return; }
+        if (!check) { setShowKeyModal(true); return; }
     }
 
     try {
@@ -339,11 +356,10 @@ export const VideoDubber: React.FC<{ interfaceLang?: 'am' | 'en' }> = ({ interfa
                         let rate = decodedBuffer.duration / slotDur;
                         
                         // --- FIX PITCH / CHIPMUNK ISSUE ---
-                        // Instead of forcing the audio to fit by speeding it up significantly (which raises pitch),
-                        // we strictly cap the playback rate to 1.1x.
+                        // We strictly cap the playback rate to 1.3x max as per user request.
+                        // Lower bound 0.8x allows filling gaps.
                         // If the audio is longer, it will naturally OVERLAP into the next segment or silence.
-                        // This maintains voice quality.
-                        rate = Math.min(Math.max(rate, 0.9), 1.1);
+                        rate = Math.min(Math.max(rate, 0.8), 1.3);
                         
                         source.playbackRate.value = rate;
                         
@@ -412,8 +428,8 @@ export const VideoDubber: React.FC<{ interfaceLang?: 'am' | 'en' }> = ({ interfa
                       
                       // Apply same pitch constraints to export
                       let rate = buf.duration / slotDur;
-                      // STRICT CAP 1.1x for quality export
-                      rate = Math.min(Math.max(rate, 0.9), 1.1);
+                      // Cap 1.3x for quality export
+                      rate = Math.min(Math.max(rate, 0.8), 1.3);
                       
                       src.playbackRate.value = rate;
                       
@@ -467,10 +483,42 @@ export const VideoDubber: React.FC<{ interfaceLang?: 'am' | 'en' }> = ({ interfa
        <div className="flex-[2] flex flex-col gap-4 relative group min-h-[50vh]">
            <GlassCard className="relative w-full h-full overflow-hidden flex items-center justify-center bg-black shadow-2xl rounded-[2.5rem]">
              {!apiConnected && (
-                 <div className="absolute top-4 left-4 z-50 bg-red-500/20 text-red-200 px-4 py-2 rounded-xl flex items-center gap-2 border border-red-500/30">
+                 <button onClick={() => setShowKeyModal(true)} className="absolute top-4 left-4 z-50 bg-red-500/20 text-red-200 px-4 py-2 rounded-xl flex items-center gap-2 border border-red-500/30 hover:bg-red-500/30 transition-all">
                      <WifiOff className="w-4 h-4"/> <span className="text-xs font-bold">{t.checkKey}</span>
+                 </button>
+             )}
+             
+             {/* API Key Modal */}
+             {showKeyModal && (
+                 <div className="absolute inset-0 z-[100] bg-black/90 backdrop-blur-xl flex items-center justify-center p-6">
+                     <div className="w-full max-w-md bg-gray-900 border border-white/10 rounded-3xl p-8 space-y-6 shadow-2xl">
+                         <div className="text-center">
+                             <div className="w-12 h-12 bg-blue-500/20 rounded-full flex items-center justify-center mx-auto mb-4 text-blue-400">
+                                 <Key className="w-6 h-6"/>
+                             </div>
+                             <h3 className="text-xl font-bold text-white font-ethiopic">{t.apiKeyRequired}</h3>
+                             <p className="text-gray-400 text-sm mt-2">To use NebulaDub, please enter your Google AI Studio API key.</p>
+                         </div>
+                         <input 
+                             type="password" 
+                             value={tempApiKey}
+                             onChange={(e) => setTempApiKey(e.target.value)}
+                             placeholder="AIza..."
+                             className="w-full bg-black/50 border border-white/10 rounded-xl px-4 py-3 text-white placeholder-gray-600 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                         />
+                         <div className="flex gap-3">
+                             <button onClick={() => setShowKeyModal(false)} className="flex-1 py-3 rounded-xl hover:bg-white/5 text-gray-400 font-bold transition-all">{t.cancel}</button>
+                             <button onClick={handleSaveApiKey} disabled={!tempApiKey} className="flex-1 py-3 bg-blue-600 hover:bg-blue-500 rounded-xl text-white font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed">
+                                 {t.save}
+                             </button>
+                         </div>
+                         <p className="text-center text-[10px] text-gray-600">
+                             Key is stored locally in your browser.
+                         </p>
+                     </div>
                  </div>
              )}
+
              {videoUrl ? (
                <div className="relative w-full h-full bg-black flex items-center justify-center">
                  <video ref={videoRef} src={videoUrl} className="max-w-full max-h-full" onPlay={() => { initAudioContext(); setIsPlaying(true); }} onPause={() => setIsPlaying(false)} onEnded={() => setIsPlaying(false)} onLoadedMetadata={e => setDuration(e.currentTarget.duration)} />
@@ -535,12 +583,13 @@ export const VideoDubber: React.FC<{ interfaceLang?: 'am' | 'en' }> = ({ interfa
                              <button onClick={() => { if(videoRef.current) { if(isPlaying) videoRef.current.pause(); else { initAudioContext(); videoRef.current.play(); }}}} className="p-2 bg-white/10 rounded-full hover:bg-white/20 transition-colors">
                                  {isPlaying ? <Pause className="fill-white"/> : <Play className="fill-white ml-1"/>}
                              </button>
-                             <div className="flex gap-4">
+                             <div className="flex gap-4 items-center">
                                 <div className="flex items-center gap-2 bg-white/5 rounded-full px-3 py-1">
                                     <Volume2 className="w-4 h-4 text-gray-400"/>
                                     <input type="range" min="0" max="1" step="0.1" value={originalVolume} onChange={e => { setOriginalVolume(parseFloat(e.target.value)); if (videoRef.current) videoRef.current.volume = parseFloat(e.target.value); }} className="w-20 h-1 bg-white/20 rounded-lg appearance-none"/>
                                 </div>
                                 <button onClick={() => setShowSubSettings(!showSubSettings)}><Settings className="w-5 h-5 text-gray-400 hover:text-white transition-colors"/></button>
+                                <button onClick={() => setShowKeyModal(true)} title="Update API Key" className="p-2 hover:bg-white/10 rounded-full transition-colors"><Key className="w-4 h-4 text-yellow-500/70" /></button>
                              </div>
                         </div>
                      </div>

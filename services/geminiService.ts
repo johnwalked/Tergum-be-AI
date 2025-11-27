@@ -1,18 +1,44 @@
 import { GoogleGenAI, Modality, LiveServerMessage, GenerateContentResponse } from "@google/genai";
 import { VideoAnalysisResult, SpeakerAnalysis, DubbingSegment } from "../types";
 
+let userApiKey: string | null = localStorage.getItem('nebula_api_key');
+
+export const setGeminiApiKey = (key: string) => {
+    userApiKey = key;
+    localStorage.setItem('nebula_api_key', key);
+};
+
 const getClient = () => {
-  const apiKey = process.env.API_KEY;
-  if (!apiKey) throw new Error("API Key not found");
+  const apiKey = userApiKey || process.env.API_KEY;
+  if (!apiKey) throw new Error("API Key missing. Please set it in the settings.");
   return new GoogleGenAI({ apiKey });
 };
 
 const cleanJson = (text: string) => {
-  let cleaned = text.trim();
-  if (cleaned.startsWith('```')) {
-    cleaned = cleaned.replace(/^```(json)?/, '').replace(/```$/, '');
+  if (!text) return "";
+  
+  // Find the first '{' or '['
+  const startObject = text.indexOf('{');
+  const startArray = text.indexOf('[');
+  
+  let start = -1;
+  let end = -1;
+  
+  // Determine if it's likely an object or an array based on which comes first
+  if (startObject !== -1 && (startArray === -1 || startObject < startArray)) {
+      start = startObject;
+      end = text.lastIndexOf('}');
+  } else if (startArray !== -1) {
+      start = startArray;
+      end = text.lastIndexOf(']');
   }
-  return cleaned.trim();
+
+  if (start !== -1 && end !== -1 && end > start) {
+      return text.substring(start, end + 1);
+  }
+  
+  // Fallback: aggressive markdown stripping
+  return text.replace(/```json/gi, '').replace(/```/g, '').trim();
 };
 
 const writeString = (view: DataView, offset: number, string: string) => {
@@ -279,10 +305,10 @@ export const translateAndRefineScript = async (segments: DubbingSegment[], targe
         VIDEO CONTEXT: "${contextSummary}"
 
         CRITICAL DUBBING RULES:
-        1. **Completeness & Expression**: Include *everything* the speaker implies. If they laugh, sigh, or exclaim, include those nuances in the text representation or words. 
-        2. **Rhythmic Matching**: The Amharic translation MUST approximate the syllable count and duration of the original text.
-        3. **EXTREME COMPRESSION**: Amharic text tends to be longer. You MUST use **EXTREMELY CONCISE** synonyms to fit the time slot. Brevity is key to avoiding sped-up audio.
-        4. **Timing**: If the original slot is short, be concise.
+        1. **Completeness & Expression**: Include *everything* the speaker implies. If they laugh, sigh, or exclaim, include those nuances in the text representation.
+        2. **Rhythmic Matching**: The translated text MUST approximate the **syllable count** and **duration** of the original text. This is crucial for seamless lip-sync.
+        3. **EXTREME COMPRESSION**: ${targetLanguage} text can be longer. You MUST use **concise synonyms** to fit the time slot. Avoid translating word-for-word if it makes the sentence too long.
+        4. **Timing**: If the original slot is short (e.g., < 2s), use short interjections or very brief phrases.
         
         Input Segments:
         ${JSON.stringify(payload)}
