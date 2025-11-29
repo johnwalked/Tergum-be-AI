@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { GlassCard } from './GlassCard';
-import { Upload, Play, Pause, Volume2, Settings, Scissors, Sparkles, RefreshCw, AlertTriangle, Download, Edit2, Save, X, Mic, UserPlus, WifiOff, Clock, User, Zap, Key } from 'lucide-react';
-import { analyzeVideoForDubbing, translateAndRefineScript, generateSpeechTTS, audioBufferToWav, analyzeVoiceSample, checkApiConnection, setGeminiApiKey, hasApiKey } from '../services/geminiService';
+import { Upload, Play, Pause, Volume2, Settings, Scissors, Sparkles, RefreshCw, AlertTriangle, Download, Edit2, Save, X, Mic, UserPlus, WifiOff, Clock, User, Zap } from 'lucide-react';
+import { analyzeVideoForDubbing, translateAndRefineScript, generateSpeechTTS, analyzeVoiceSample, checkApiConnection } from '../services/geminiService';
 import { ProcessingStatus, VideoAnalysisResult, SpeakerAnalysis, DubbingSegment, ClonedVoice } from '../types';
 
 interface AudioData { url: string; duration: number; }
@@ -16,7 +16,7 @@ const UI_TEXT = {
         retry: "እንደገና", cancel: "ተው", confirmSplit: "ከፋፍል", failedSegment: "መክሸፍ", failedReason: "ምክንያት",
         connectionLost: "የበይነመረብ ግንኙነት ጠፍቷል", checkKey: "ኤፒአይ ቁልፍን ያረጋግጡ",
         retryAll: "ሁሉንም እንደገና ይሞክሩ", translating: "ስክሪፕት በመተርጎም ላይ...",
-        estTime: "የቀረው ጊዜ", sec: "ሰከንድ", apiKeyRequired: "የ Gemini API ቁልፍ ያስፈልጋል", enterKey: "ቁልፍ ያስገቡ"
+        estTime: "የቀረው ጊዜ", sec: "ሰከንድ"
     },
     en: {
         uploadTitle: "UPLOAD VIDEO", uploadDesc: "Max 50MB • MP4/MOV",
@@ -26,7 +26,7 @@ const UI_TEXT = {
         retry: "Retry", cancel: "Cancel", confirmSplit: "Split", failedSegment: "Failed", failedReason: "Reason",
         connectionLost: "API Connection Failed", checkKey: "Check API Key",
         retryAll: "Retry All Failed", translating: "Translating Script...",
-        estTime: "Est. Time", sec: "s", apiKeyRequired: "Gemini API Key Required", enterKey: "Enter Key"
+        estTime: "Est. Time", sec: "s"
     }
 };
 
@@ -45,10 +45,6 @@ export const VideoDubber: React.FC<{ interfaceLang?: 'am' | 'en' }> = ({ interfa
   const [segmentErrors, setSegmentErrors] = useState<Record<string, string>>({}); 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [apiConnected, setApiConnected] = useState<boolean>(true);
-  
-  // API Key State
-  const [showKeyModal, setShowKeyModal] = useState(false);
-  const [tempApiKey, setTempApiKey] = useState('');
   
   // Progress State
   const [progress, setProgress] = useState(0);
@@ -96,21 +92,8 @@ export const VideoDubber: React.FC<{ interfaceLang?: 'am' | 'en' }> = ({ interfa
   
   // Initial API Check
   useEffect(() => {
-      // Use helper to avoid crash if process is undefined in browser
-      if (!hasApiKey()) {
-          setShowKeyModal(true);
-      } else {
-          checkApiConnection().then(setApiConnected);
-      }
+      checkApiConnection().then(setApiConnected);
   }, []);
-
-  const handleSaveApiKey = () => {
-      if (tempApiKey.trim()) {
-          setGeminiApiKey(tempApiKey.trim());
-          setShowKeyModal(false);
-          checkApiConnection().then(setApiConnected);
-      }
-  };
 
   // Initialize Audio Context and Graph
   const initAudioContext = () => {
@@ -275,7 +258,6 @@ export const VideoDubber: React.FC<{ interfaceLang?: 'am' | 'en' }> = ({ interfa
     if (!apiConnected) {
         const check = await checkApiConnection();
         setApiConnected(check);
-        if (!check) { setShowKeyModal(true); return; }
     }
 
     try {
@@ -552,39 +534,8 @@ export const VideoDubber: React.FC<{ interfaceLang?: 'am' | 'en' }> = ({ interfa
        <div className="flex-[2] flex flex-col gap-4 relative group min-h-[50vh]">
            <GlassCard className="relative w-full h-full overflow-hidden flex items-center justify-center bg-black shadow-2xl rounded-[2.5rem]">
              {!apiConnected && (
-                 <button onClick={() => setShowKeyModal(true)} className="absolute top-4 left-4 z-50 bg-red-500/20 text-red-200 px-4 py-2 rounded-xl flex items-center gap-2 border border-red-500/30 hover:bg-red-500/30 transition-all">
-                     <WifiOff className="w-4 h-4"/> <span className="text-xs font-bold">{t.checkKey}</span>
-                 </button>
-             )}
-             
-             {/* API Key Modal */}
-             {showKeyModal && (
-                 <div className="absolute inset-0 z-[100] bg-black/90 backdrop-blur-xl flex items-center justify-center p-6">
-                     <div className="w-full max-w-md bg-gray-900 border border-white/10 rounded-3xl p-8 space-y-6 shadow-2xl">
-                         <div className="text-center">
-                             <div className="w-12 h-12 bg-blue-500/20 rounded-full flex items-center justify-center mx-auto mb-4 text-blue-400">
-                                 <Key className="w-6 h-6"/>
-                             </div>
-                             <h3 className="text-xl font-bold text-white font-ethiopic">{t.apiKeyRequired}</h3>
-                             <p className="text-gray-400 text-sm mt-2">To use NebulaDub, please enter your Google AI Studio API key.</p>
-                         </div>
-                         <input 
-                             type="password" 
-                             value={tempApiKey}
-                             onChange={(e) => setTempApiKey(e.target.value)}
-                             placeholder="AIza..."
-                             className="w-full bg-black/50 border border-white/10 rounded-xl px-4 py-3 text-white placeholder-gray-600 focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                         />
-                         <div className="flex gap-3">
-                             <button onClick={() => setShowKeyModal(false)} className="flex-1 py-3 rounded-xl hover:bg-white/5 text-gray-400 font-bold transition-all">{t.cancel}</button>
-                             <button onClick={handleSaveApiKey} disabled={!tempApiKey} className="flex-1 py-3 bg-blue-600 hover:bg-blue-500 rounded-xl text-white font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed">
-                                 {t.save}
-                             </button>
-                         </div>
-                         <p className="text-center text-[10px] text-gray-600">
-                             Key is stored locally in your browser.
-                         </p>
-                     </div>
+                 <div className="absolute top-4 left-4 z-50 bg-red-500/20 text-red-200 px-4 py-2 rounded-xl flex items-center gap-2 border border-red-500/30 hover:bg-red-500/30 transition-all">
+                     <WifiOff className="w-4 h-4"/> <span className="text-xs font-bold">{t.connectionLost}</span>
                  </div>
              )}
 
@@ -669,7 +620,6 @@ export const VideoDubber: React.FC<{ interfaceLang?: 'am' | 'en' }> = ({ interfa
                                     <input type="range" min="0" max="1" step="0.1" value={originalVolume} onChange={e => handleVolumeChange(parseFloat(e.target.value))} className="w-20 h-1 bg-white/20 rounded-lg appearance-none"/>
                                 </div>
                                 <button onClick={() => setShowSubSettings(!showSubSettings)}><Settings className="w-5 h-5 text-gray-400 hover:text-white transition-colors"/></button>
-                                <button onClick={() => setShowKeyModal(true)} title="Update API Key" className="p-2 hover:bg-white/10 rounded-full transition-colors"><Key className="w-4 h-4 text-yellow-500/70" /></button>
                              </div>
                         </div>
                      </div>

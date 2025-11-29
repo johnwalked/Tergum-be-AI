@@ -1,33 +1,9 @@
 import { GoogleGenAI, Modality, LiveServerMessage, GenerateContentResponse } from "@google/genai";
 import { VideoAnalysisResult, SpeakerAnalysis, DubbingSegment } from "../types";
 
-let userApiKey: string | null = localStorage.getItem('nebula_api_key');
-
-export const setGeminiApiKey = (key: string) => {
-    userApiKey = key;
-    localStorage.setItem('nebula_api_key', key);
-};
-
-// Helper to safely access environment variable without crashing if process is undefined
-const getEnvApiKey = (): string | undefined => {
-    try {
-        if (typeof process !== 'undefined' && process.env?.API_KEY) {
-            return process.env.API_KEY;
-        }
-    } catch (e) {
-        // process is not defined, ignore
-    }
-    return undefined;
-};
-
-export const hasApiKey = (): boolean => {
-    return !!(userApiKey || getEnvApiKey());
-};
-
 const getClient = () => {
-  const apiKey = userApiKey || getEnvApiKey();
-  if (!apiKey) throw new Error("API Key missing. Please set it in the settings.");
-  return new GoogleGenAI({ apiKey });
+  // The API key must be obtained exclusively from the environment variable process.env.API_KEY.
+  return new GoogleGenAI({ apiKey: process.env.API_KEY });
 };
 
 const cleanJson = (text: string) => {
@@ -134,29 +110,6 @@ export const checkApiConnection = async (): Promise<boolean> => {
     console.error("API Connection Check Failed:", e);
     return false;
   }
-};
-
-export const audioBufferToWav = (buffer: AudioBuffer): Blob => {
-  const numChannels = buffer.numberOfChannels;
-  const sampleRate = buffer.sampleRate;
-  const length = buffer.length * numChannels * 2; 
-  const outputBuffer = new ArrayBuffer(44 + length);
-  const view = new DataView(outputBuffer);
-  
-  writeString(view, 0, 'RIFF'); view.setUint32(4, 36 + length, true); writeString(view, 8, 'WAVE');
-  writeString(view, 12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
-  view.setUint16(22, numChannels, true); view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * numChannels * 2, true); view.setUint16(32, numChannels * 2, true);
-  view.setUint16(34, 16, true); writeString(view, 36, 'data'); view.setUint32(40, length, true);
-  
-  const offset = 44;
-  for (let i = 0; i < buffer.length; i++) {
-    for (let channel = 0; channel < numChannels; channel++) {
-      const s = Math.max(-1, Math.min(1, buffer.getChannelData(channel)[i]));
-      view.setInt16(offset + (i * numChannels + channel) * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
-    }
-  }
-  return new Blob([outputBuffer], { type: 'audio/wav' });
 };
 
 const pcmToWav = (pcmData: Uint8Array, sampleRate: number): Blob => {
@@ -276,16 +229,23 @@ export const analyzeVideoForDubbing = async (videoBase64: string, mimeType: stri
         config: { responseMimeType: "application/json" },
       });
 
-      const result = JSON.parse(cleanJson(response.text || "{}")) as VideoAnalysisResult;
+      const rawText = cleanJson(response.text || "{}");
+      const result = JSON.parse(rawText) as VideoAnalysisResult;
       if (!result.segments) result.segments = [];
       
       // Post-process segments
-      result.segments = result.segments.map((s, i) => ({ 
-          ...s, 
-          id: s.id || `s_${i}`,
-          startTime: parseTime(s.startTime),
-          endTime: parseTime(s.endTime)
-      }));
+      result.segments = result.segments.map((s: any, i) => {
+          // Robust key checking for timestamps
+          const start = s.startTime ?? s.start_time ?? s.start ?? 0;
+          const end = s.endTime ?? s.end_time ?? s.end ?? 0;
+
+          return { 
+            ...s, 
+            id: s.id || `s_${i}`,
+            startTime: parseTime(start),
+            endTime: parseTime(end)
+          };
+      });
       result.segments.sort((a, b) => a.startTime - b.startTime);
 
       // Post-process speakers with Voice Matching
@@ -316,16 +276,17 @@ export const translateAndRefineScript = async (segments: DubbingSegment[], targe
     // Gemini 3 Context-Aware Dubbing Prompt
     const prompt = `
         You are a World-Class Dubbing Adaptor using Gemini 3.
-        Task: Translate the following subtitle segments into **Natural, Expressive, Lip-Syncable ${targetLanguage}**.
+        Task: Translate the following subtitle segments into **Natural, Expressive, Lip-Syncable Amharic**.
         
         VIDEO CONTEXT: "${contextSummary}"
 
         CRITICAL DUBBING RULES:
-        1. **Completeness & Expression**: Include *everything* the speaker implies. If they laugh, sigh, or exclaim, include those nuances in the text representation.
-        2. **Rhythmic Matching**: The translated text MUST approximate the **syllable count** and **duration** of the original text. This is crucial for seamless lip-sync.
-        3. **EXTREME COMPRESSION**: ${targetLanguage} text can be longer. You MUST use **concise synonyms** to fit the time slot. Avoid translating word-for-word if it makes the sentence too long.
-        4. **Timing**: If the original slot is short (e.g., < 2s), use short interjections or very brief phrases.
-        
+        1. **TARGET LANGUAGE**: ALWAYS translate to **Amharic** regardless of input.
+        2. **Completeness**: Return a translation for EVERY segment ID provided. Do not skip any.
+        3. **Rhythmic Matching**: The Amharic translation MUST approximate the duration of the original text.
+        4. **EXTREME COMPRESSION**: Amharic text can be longer. You MUST use **concise synonyms** to fit the time slot. 
+        5. **No Notes**: Return ONLY the JSON.
+
         Input Segments:
         ${JSON.stringify(payload)}
 
@@ -362,6 +323,13 @@ export const translateAndRefineScript = async (segments: DubbingSegment[], targe
 
 export const generateSpeechTTS = async (text: string, voiceName: string): Promise<Blob | null> => {
   const ai = getClient();
+
+  // Validate voice name against supported 2.5 Flash TTS voices
+  const supportedVoices = ['Charon', 'Fenrir', 'Puck', 'Orpheus', 'Kore', 'Zephyr', 'Aoede', 'Leda'];
+  if (!supportedVoices.includes(voiceName)) {
+      console.warn(`Voice ${voiceName} not supported, falling back to Kore`);
+      voiceName = 'Kore';
+  }
 
   // Clean text but allow punctuation for prosody and expressions
   let cleanText = text.replace(/[\(\[].*?[\)\]]/g, '') 
