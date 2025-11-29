@@ -1,33 +1,9 @@
 import { GoogleGenAI, Modality, LiveServerMessage, GenerateContentResponse } from "@google/genai";
 import { VideoAnalysisResult, SpeakerAnalysis, DubbingSegment } from "../types";
 
-let userApiKey: string | null = localStorage.getItem('nebula_api_key');
-
-export const setGeminiApiKey = (key: string) => {
-    userApiKey = key;
-    localStorage.setItem('nebula_api_key', key);
-};
-
-// Helper to safely access environment variable without crashing if process is undefined
-const getEnvApiKey = (): string | undefined => {
-    try {
-        if (typeof process !== 'undefined' && process.env?.API_KEY) {
-            return process.env.API_KEY;
-        }
-    } catch (e) {
-        // process is not defined, ignore
-    }
-    return undefined;
-};
-
-export const hasApiKey = (): boolean => {
-    return !!(userApiKey || getEnvApiKey());
-};
-
 const getClient = () => {
-  const apiKey = userApiKey || getEnvApiKey();
-  if (!apiKey) throw new Error("API Key missing. Please set it in the settings.");
-  return new GoogleGenAI({ apiKey });
+  // The API key must be obtained exclusively from the environment variable process.env.API_KEY.
+  return new GoogleGenAI({ apiKey: process.env.API_KEY });
 };
 
 const cleanJson = (text: string) => {
