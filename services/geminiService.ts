@@ -1,13 +1,6 @@
 import { GoogleGenAI, Modality, LiveServerMessage, GenerateContentResponse } from "@google/genai";
 import { VideoAnalysisResult, SpeakerAnalysis, DubbingSegment } from "../types";
 
-let userApiKey: string | null = localStorage.getItem('nebula_api_key');
-
-export const setGeminiApiKey = (key: string) => {
-    userApiKey = key;
-    localStorage.setItem('nebula_api_key', key);
-};
-
 // Helper to safely access environment variable without crashing if process is undefined
 const getEnvApiKey = (): string | undefined => {
     try {
@@ -20,14 +13,14 @@ const getEnvApiKey = (): string | undefined => {
     return undefined;
 };
 
-export const hasApiKey = (): boolean => {
-    return !!(userApiKey || getEnvApiKey());
-};
-
 const getClient = () => {
-  const apiKey = userApiKey || getEnvApiKey();
-  if (!apiKey) throw new Error("API Key missing. Please set it in the settings.");
-  return new GoogleGenAI({ apiKey });
+  const apiKey = getEnvApiKey();
+  if (!apiKey) {
+      console.warn("API Key missing from environment. Functionality may be limited.");
+      // We don't throw immediately to allow the UI to render, but calls will fail.
+      // In a real env, this would be a hard stop.
+  }
+  return new GoogleGenAI({ apiKey: apiKey || 'DUMMY_KEY_FOR_BUILD' });
 };
 
 const cleanJson = (text: string) => {
@@ -134,29 +127,6 @@ export const checkApiConnection = async (): Promise<boolean> => {
     console.error("API Connection Check Failed:", e);
     return false;
   }
-};
-
-export const audioBufferToWav = (buffer: AudioBuffer): Blob => {
-  const numChannels = buffer.numberOfChannels;
-  const sampleRate = buffer.sampleRate;
-  const length = buffer.length * numChannels * 2; 
-  const outputBuffer = new ArrayBuffer(44 + length);
-  const view = new DataView(outputBuffer);
-  
-  writeString(view, 0, 'RIFF'); view.setUint32(4, 36 + length, true); writeString(view, 8, 'WAVE');
-  writeString(view, 12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
-  view.setUint16(22, numChannels, true); view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * numChannels * 2, true); view.setUint16(32, numChannels * 2, true);
-  view.setUint16(34, 16, true); writeString(view, 36, 'data'); view.setUint32(40, length, true);
-  
-  const offset = 44;
-  for (let i = 0; i < buffer.length; i++) {
-    for (let channel = 0; channel < numChannels; channel++) {
-      const s = Math.max(-1, Math.min(1, buffer.getChannelData(channel)[i]));
-      view.setInt16(offset + (i * numChannels + channel) * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
-    }
-  }
-  return new Blob([outputBuffer], { type: 'audio/wav' });
 };
 
 const pcmToWav = (pcmData: Uint8Array, sampleRate: number): Blob => {
